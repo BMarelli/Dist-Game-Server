@@ -69,7 +69,7 @@ gamelist(Games) ->
             % GameProcessId = spawn(?MODULE, game, [[Player1, null], 1, []]),
             [{gamelist, Node} ! {add_game, GameId, GameProcessId} || Node <- nodes()],
             gamelist(maps:put(GameId, GameProcessId, Games));
-        {get_games, Caller} -> Caller ! Games, gamelist(Games)
+        {get_games, Caller} -> Caller ! maps:keys(Games), gamelist(Games)
     end,
     ok.
 
@@ -101,12 +101,15 @@ psocket(Socket) ->
                             gen_tcp:send(Socket, "OK"),
                             gen_tcp:close(Socket);
                         {lsg, CMDID, Games} ->
-                            % io:format(">> Enviando lista de juegos a ~p.~n", [Username]),
-                            gen_tcp:send(Socket, "OK " ++ CMDID ++ " " ++ string:join(" ", Games)),
+                            io:format(">> Enviando lista de juegos a ~p.~n", [Socket]),
+                            case Games of
+                                [] -> gen_tcp:send(Socket, "OK " ++ CMDID);
+                                _ -> gen_tcp:send(Socket, "OK " ++ CMDID ++ " " ++ string:join(Games, " "))
+                            end,
                             psocket(Socket);
                         {create_game, CMDID} ->
                             % io:format(">> Creando nuevo juego para ~p.~n", [Username]),
-                            gen_tcp:send("OK " ++ CMDID),
+                            gen_tcp:send(Socket, "OK " ++ CMDID),
                             psocket(Socket);
                         % {acc, CMDID, JuegoId} ->
                         %     io:format(">> TODO"),
@@ -155,7 +158,7 @@ pcomando(Data, PSocketId, Socket, CallerNode) ->
         [CMD, CMDID | Args] ->
             case {CMD, Args} of
                 {"LSG", []} -> gamelist ! {get_games, self()}, receive Games -> PSocketId ! {lsg, CMDID, Games} end;
-                {"NEW", []} -> gamelist ! {create_game, Socket}, PSocketId ! {create_game, CMDID};
+                {"NEW", []} -> gamelist ! {create_game, Socket}, PSocketId ! {new, CMDID};
                 {"ACC", [JuegoId]} -> PSocketId ! {acc, CMDID, JuegoId};
                 {"PLA", [JuegoId, Jugada]} -> PSocketId ! {pla, CMDID, JuegoId, Jugada};
                 {"OBS", [JuegoId]} -> PSocketId ! {obs, CMDID, JuegoId};
