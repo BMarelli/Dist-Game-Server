@@ -3,6 +3,8 @@
 -define(PSTAT_INTERVAL, 10000).
 -define(DEFAULT_PORT, 8000).
 
+format(String, Data) -> lists:flatten(io_lib:format(String, Data)).
+
 spawn_services(ListenSocket) ->
     {_, Port} = inet:port(ListenSocket),
     io:format(">> Socket creado. Escuchando en puerto ~p.~n", [Port]),
@@ -103,13 +105,12 @@ psocket(Socket) ->
                         {lsg, CMDID, Games} ->
                             io:format(">> Enviando lista de juegos a ~p.~n", [Socket]),
                             case Games of
-                                [] -> gen_tcp:send(Socket, "OK " ++ CMDID);
-                                _ -> gen_tcp:send(Socket, "OK " ++ CMDID ++ " " ++ string:join(Games, " "))
+                                [] -> gen_tcp:send(Socket, format("OK ~s", [CMDID]));
+                                _ -> gen_tcp:send(Socket, format("OK ~s ~s", [CMDID, string:join(Games, " ")]))
                             end,
                             psocket(Socket);
-                        {create_game, CMDID} ->
-                            % io:format(">> Creando nuevo juego para ~p.~n", [Username]),
-                            gen_tcp:send(Socket, "OK " ++ CMDID),
+                        {new, CMDID} ->
+                            gen_tcp:send(Socket, format("OK ~s", [CMDID])),
                             psocket(Socket);
                         % {acc, CMDID, JuegoId} ->
                         %     io:format(">> TODO"),
@@ -127,7 +128,7 @@ psocket(Socket) ->
                         %     io:format(">> TODO"),
                         %     gen_tcp:send("OK " ++ CMDID)
                         %     psocket(Socket, Username);
-                        {error} ->
+                        error ->
                             % abstraer correctamente errores. cada comando erroneo deberia recibir correctamente su mensaje ERROR op1 op2...
                             io:format(">> Error: no se pudo procesar el comando.~n"),
                             psocket(Socket);
@@ -143,7 +144,7 @@ psocket(Socket) ->
 
 pcomando(Data, PSocketId, Socket, CallerNode) ->
     % io:format(user, ">> Ejecutando pcomando de ~p para ~p.~n", [ Caller]),
-    Lexemes = string:lexemes(Data, " "),
+    Lexemes = string:lexemes(string:trim(Data), " "),
     case Lexemes of
         ["CON", Username] ->
             {userlist, CallerNode} ! {put_user, Socket, Username, self()},
