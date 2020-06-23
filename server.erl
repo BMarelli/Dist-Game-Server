@@ -8,7 +8,7 @@
 
 format(String, Data) -> lists:flatten(io_lib:format(String, Data)).
 
-globalize(Ids) -> [format("~s|~s", [Id, node()]) || Id <- Ids].
+globalize(Id) -> format("~s|~s", [Id, node()]).
 
 unsubscribe(_, []) -> ok;
 unsubscribe(Username, [Subscription | Subscriptions]) ->
@@ -98,7 +98,7 @@ gamelist(Games, Id) ->
             Caller ! {ok, globalize(GameId)},
             gamelist(maps:put(GameId, GameProcessId, Games), Id + 1);
         {get_globalized_games, Caller} ->
-            Caller ! globalize(maps:keys(Games)),
+            Caller ! [globalize(game) || game <- maps:keys(Games)],
             gamelist(Games, Id);
         {accept_game, Username, GameId, Caller} ->
             case maps:get(GameId, Games, invalid_game_id) of
@@ -153,7 +153,8 @@ dispatcher(ListenSocket) ->
     case gen_tcp:accept(ListenSocket) of
         {ok, Socket} ->
             io:format(">> Se ha conectado un nuevo cliente ~p~n", [Socket]),
-            spawn(?MODULE, psocket, [Socket, unknown, []]),
+            Pid = spawn(?MODULE, psocket, [Socket]),
+            gen_tcp:controlling_process(Socket, Pid),
             dispatcher(ListenSocket);
         {error, Reason} ->
             io:format(">> Error: ~p.~n", [Reason])
@@ -161,7 +162,7 @@ dispatcher(ListenSocket) ->
     end,
     ok.
 
-psocket(Socket, unknown, []) ->
+psocket(Socket) ->
     inet:setopts(Socket, [{active, once}]),
     receive
         {tcp, Socket, Data} ->
@@ -171,13 +172,14 @@ psocket(Socket, unknown, []) ->
                     userlist ! {put_user, Username, Socket, self()},
                     receive
                         ok -> gen_tcp:send(Socket, "OK"), psocket(Socket, Username, []);
-                        invalid_username -> gen_tcp:send(Socket, "ERROR invalid_username"), psocket(Socket, unknown, []);
-                        username_taken -> gen_tcp:send(Socket, "ERROR username_taken"), psocket(Socket, unknown, [])
+                        invalid_username -> gen_tcp:send(Socket, "ERROR invalid_username"), psocket(Socket);
+                        username_taken -> gen_tcp:send(Socket, "ERROR username_taken"), psocket(Socket)
                     end;
-                _ -> gen_tcp:send("ERROR not_registered"), psocket(Socket, unknown, [])
+                _ -> gen_tcp:send(Socket, "ERROR not_registered"), psocket(Socket)
             end;
         {tcp_closed, Socket} -> ok
-    end;
+    end.
+
 psocket(Socket, Username, Subscriptions) ->
     inet:setopts(Socket, [{active, once}]),
     receive
