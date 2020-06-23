@@ -77,9 +77,10 @@ userlist(Users) ->
 gamelist(Games, Id) ->
     io:format(">> Games: ~p.~n", [Games]),
     receive
-        {create_game, Socket} ->
+        {create_game, Socket, Caller} ->
             GameId = integer_to_list(Id),
             GameProcessId = spawn(?MODULE, game, [[], [Socket], 1, []]),
+            Caller ! {created_game, GameProcessId},
             gamelist(maps:put(GameId, GameProcessId, Games), Id + 1);
         {get_local_games, Caller} ->
             Caller ! globalize(maps:keys(Games)),
@@ -90,7 +91,7 @@ gamelist(Games, Id) ->
                 GameProcessId ->
                     GameProcessId ! {acc, Socket, self()},
                     receive
-                        ok -> Caller ! ok;
+                        ok -> Caller ! {ok, GameProcessId};
                         game_full -> Caller ! game_full
                     end
             end,
@@ -98,7 +99,7 @@ gamelist(Games, Id) ->
         {observe_game, Socket, GameId, Caller} ->
             case maps:get(GameId, Games, invalid_game_id) of
                 invalid_game_id -> Caller ! invalid_game_id;
-                GameProcessId -> GameProcessId ! {obs, Socket}, Caller ! ok
+                GameProcessId -> GameProcessId ! {obs, Socket}, Caller ! {ok, GameProcessId}
             end,
             gamelist(Games, Id);
         {player_move, Socket, GameId, Move, Caller} ->
@@ -118,7 +119,7 @@ gamelist(Games, Id) ->
                 GameProcessId ->
                     GameProcessId ! {lea, Socket, self()},
                     receive
-                        ok -> Caller ! ok;
+                        ok -> Caller ! {ok, GameProcessId};
                         not_an_observer -> Caller ! not_an_observer % No hace falta, no puede devolver un error
                     end
             end,
@@ -139,15 +140,16 @@ game(Board, Players, Turn, Observers) ->
             end;
         {obs, Observer} -> game(Board, Players, Turn, [Observer | Observers]);
         {pla, _, _, Caller} -> Caller ! ok, game(Board, Players, Turn, Observers);
-        {lea, Socket, Caller} -> Caller ! ok, game(Board, Players, Turn, lists:delete(Socket, Observers))
+        {lea, Socket, Caller} -> Caller ! ok, game(Board, Players, Turn, lists:delete(Socket, Observers));
+        {unsubscribe_socket_ply, Socket} -> game(Board, lists:delete(Socket, Players), Turn, Observers); % TODO: MEJORAR
+        {unsubscribe_socket, Socket} -> game(Board, Players, Turn, lists:delete(Socket, Observers))
     end.
-
 
 dispatcher(ListenSocket) ->
     case gen_tcp:accept(ListenSocket) of
         {ok, Socket} ->
             io:format(">> Se ha conectado un nuevo cliente ~p~n", [Socket]),
-            spawn(?MODULE, psocket, [Socket]),
+            spawn(?MODULE, psocket, [Socket, []]),
             dispatcher(ListenSocket);
         {error, Reason} ->
             io:format(">> Error: ~p.~n", [Reason])
@@ -155,7 +157,7 @@ dispatcher(ListenSocket) ->
     end,
     ok.
 
-psocket(Socket) ->
+psocket(Socket, GamesActive) ->
     case gen_tcp:recv(Socket, 0) of
         {ok, Data} ->
             pbalance ! {get_best_node, self()},
@@ -167,9 +169,10 @@ psocket(Socket) ->
                         {con, Username} ->
                             io:format(">> Se ha asociado el nombre ~p a ~p.~n", [Username, Socket]),
                             gen_tcp:send(Socket, "OK"),
-                            psocket(Socket);
+                            psocket(Socket, GamesActive);
                         bye ->
                             io:format(">> Se ha desconectado ~p.~n", [Socket]),
+                            unsubscribe(Socket, GamesActive),
                             gen_tcp:send(Socket, "OK"),
                             gen_tcp:close(Socket);
                         {lsg, CMDID, Games} ->
@@ -178,36 +181,37 @@ psocket(Socket) ->
                                 [] -> gen_tcp:send(Socket, format("OK ~s", [CMDID]));
                                 _ -> gen_tcp:send(Socket, format("OK ~s ~s", [CMDID, string:join(Games, " ")]))
                             end,
-                            psocket(Socket);
-                        {new, CMDID} ->
+                            psocket(Socket, GamesActive);
+                        {new, CMDID, GameProcessId} ->
                             io:format(">> Se ha creado un nuevo juego para ~p.~n", [Socket]),
                             gen_tcp:send(Socket, format("OK ~s", [CMDID])),
-                            psocket(Socket);
-                        {acc, CMDID, GameId} ->
+                            psocket(Socket, [{player, GameProcessId}|GamesActive]);
+                        {acc, CMDID, GameId, GameProcessId} ->
                             io:format(">> Se ha aceptado a ~p en el juego ~p.~n", [Socket, GameId]),
                             gen_tcp:send(Socket, format("OK ~s", [CMDID])),
-                            psocket(Socket);
+                            psocket(Socket, [{player, GameProcessId}|GamesActive]);
                         {pla, CMDID, GameId, Move} ->
                             io:format(">> ~p realizó el movimiento ~p en el juego ~p.~n", [Socket, Move, GameId]),
                             gen_tcp:send(Socket, format("OK ~s", [CMDID])),
-                            psocket(Socket);
-                        {obs, CMDID, GameId} ->
+                            psocket(Socket, GamesActive);
+                        {obs, CMDID, GameId, GameProcessId} ->
                             io:format(">> ~p está observando el juego ~p.~n", [Socket, GameId]),
                             gen_tcp:send(Socket, format("OK ~s", [CMDID])),
-                            psocket(Socket);
-                        {lea, CMDID, GameId} ->
+                            psocket(Socket, [{observer, GameProcessId}|GamesActive]);
+                        {lea, CMDID, GameId, GameProcessId} ->
                             io:format(">> ~p dejo de observar el juego ~p.~n", [Socket, GameId]),
                             gen_tcp:send(Socket, format("OK ~s", [CMDID])),
-                            psocket(Socket);
+                            psocket(Socket, lists:delete(GameProcessId, GamesActive));
                         {error, Reason} ->
                             gen_tcp:send(Socket, format("ERROR ~s", [Reason])),
                             io:format(">> Error: no se pudo procesar el comando.~n"), % TODO: cambiar esto
-                            psocket(Socket);
-                        _ -> io:format(">> NOT IMPLEMENTED~n"), psocket(Socket)
+                            psocket(Socket, GamesActive);
+                        _ -> io:format(">> NOT IMPLEMENTED~n"), psocket(Socket, GamesActive)
                     end
             end;
         {error, closed} ->
             io:format(">> Se ha desconectado el cliente ~p.~n", [Socket]),
+            unsubscribe(Socket, GamesActive),
             userlist ! {remove_user, Socket};
         {error, Reason} -> io:format(">> Error: ~p.~n", [Reason])
     end,
@@ -232,14 +236,18 @@ pcomando(Data, PSocketId, Socket, CallerNode) ->
                 {"LSG", []} ->
                     Games = [get_games(Node) || Node <- [node() | nodes()]],
                     PSocketId ! {lsg, CMDID, lists:concat(Games)};
-                {"NEW", []} -> gamelist ! {create_game, Socket}, PSocketId ! {new, CMDID};
+                {"NEW", []} ->
+                    gamelist ! {create_game, Socket, self()},
+                    receive
+                        {created_game, GameProcessId} -> PSocketId ! {new, CMDID, GameProcessId}
+                    end;
                 {"ACC", [GameId]} ->
                     case parse_game_id(GameId) of
                         invalid_game_id -> PSocketId ! {error, format("~s invalid_game_id", [CMDID])};
                         {Id, Node} ->
                             {gamelist, Node} ! {accept_game, Socket, Id, self()},
                             receive
-                                ok -> PSocketId ! {acc, CMDID, GameId};
+                                {ok, GameProcessId} -> PSocketId ! {acc, CMDID, GameId, GameProcessId};
                                 game_full -> PSocketId ! {error, format("~s game_full", [CMDID])};
                                 invalid_game_id -> PSocketId ! {error, format("~s invalid_game_id", [CMDID])}
                             end
@@ -260,7 +268,7 @@ pcomando(Data, PSocketId, Socket, CallerNode) ->
                         {Id, Node} ->
                             {gamelist, Node} ! {observe_game, Socket, Id, self()},
                             receive
-                                ok -> PSocketId ! {obs, CMDID, GameId};
+                                {ok, GameProcessId} -> PSocketId ! {obs, CMDID, GameId, GameProcessId};
                                 invalid_game_id -> PSocketId ! {error, format("~s invalid_game_id", [CMDID])}
                             end
                     end;
@@ -270,7 +278,7 @@ pcomando(Data, PSocketId, Socket, CallerNode) ->
                         {Id, Node} ->
                             {gamelist, Node} ! {leave_obs, Socket, Id, self()},
                             receive
-                                ok -> PSocketId ! {lea, CMDID, GameId};
+                                {ok, GameProcessId} -> PSocketId ! {lea, CMDID, GameId, GameProcessId};
                                 invalid_game_id -> PSocketId ! {error, format("~s invalid_game_id", [CMDID])}
                             end
                         end;
@@ -279,3 +287,11 @@ pcomando(Data, PSocketId, Socket, CallerNode) ->
         _ -> PSocketId ! {error, "invalid_command"}
     end,
     ok.
+
+unsubscribe(_, []) -> ok;
+unsubscribe(Socket, [{player, GameProcessId} | GamesActive]) ->
+    GameProcessId ! {unsubscribe_socket_ply, Socket},
+    unsubscribe(Socket, GamesActive);
+unsubscribe(Socket, [{observer, GameProcessId}|GamesActive]) ->
+    GameProcessId ! {unsubscribe_socket_obs, Socket},
+    unsubscribe(Socket, GamesActive).
