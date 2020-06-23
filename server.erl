@@ -111,6 +111,17 @@ gamelist(Games, Id) ->
                         invalid_move -> Caller ! invalid_move
                     end
             end,
+            gamelist(Games, Id);
+        {leave_obs, Socket, GameId, Caller} ->
+            case maps:get(GameId, Games, invalid_game_id) of
+                invalid_game_id -> Caller ! invalid_game_id;
+                GameProcessId ->
+                    GameProcessId ! {lea, Socket, self()},
+                    receive
+                        ok -> Caller ! ok;
+                        not_an_observer -> Caller ! not_an_observer % No hace falta, no puede devolver un error
+                    end
+            end,
             gamelist(Games, Id)
     end,
     ok.
@@ -127,7 +138,8 @@ game(Board, Players, Turn, Observers) ->
                 [_, _] -> Caller ! game_full, game(Board, Players, Turn, Observers)
             end;
         {obs, Observer} -> game(Board, Players, Turn, [Observer | Observers]);
-        {pla, _, _, Caller} -> Caller ! ok, game(Board, Players, Turn, Observers)
+        {pla, _, _, Caller} -> Caller ! ok, game(Board, Players, Turn, Observers);
+        {lea, Socket, Caller} -> Caller ! ok, game(Board, Players, Turn, lists:delete(Socket, Observers))
     end.
 
 
@@ -181,6 +193,10 @@ psocket(Socket) ->
                             psocket(Socket);
                         {obs, CMDID, GameId} ->
                             io:format(">> ~p está observando el juego ~p.~n", [Socket, GameId]),
+                            gen_tcp:send(Socket, format("OK ~s", [CMDID])),
+                            psocket(Socket);
+                        {lea, CMDID, GameId} ->
+                            io:format(">> ~p dejo de observar el juego ~p.~n", [Socket, GameId]),
                             gen_tcp:send(Socket, format("OK ~s", [CMDID])),
                             psocket(Socket);
                         {error, Reason} ->
@@ -245,10 +261,19 @@ pcomando(Data, PSocketId, Socket, CallerNode) ->
                             {gamelist, Node} ! {observe_game, Socket, Id, self()},
                             receive
                                 ok -> PSocketId ! {obs, CMDID, GameId};
-                                invalid_game_id -> PSocketId ! {error, format("~s invalid_move", [CMDID])}
+                                invalid_game_id -> PSocketId ! {error, format("~s invalid_game_id", [CMDID])}
                             end
                     end;
-                {"LEA", [GameId]} -> PSocketId ! {lea, CMDID, GameId};
+                {"LEA", [GameId]} -> 
+                    case parse_game_id(GameId) of
+                        invalid_game_id -> PSocketId ! {error, format("~s invalid_game_id", [CMDID])};
+                        {Id, Node} ->
+                            {gamelist, Node} ! {leave_obs, Socket, Id, self()},
+                            receive
+                                ok -> PSocketId ! {lea, CMDID, GameId};
+                                invalid_game_id -> PSocketId ! {error, format("~s invalid_game_id", [CMDID])}
+                            end
+                        end;
                 _ -> PSocketId ! {error, format("~s invalid_command", [CMDID])}
             end;
         _ -> PSocketId ! {error, "invalid_command"}
