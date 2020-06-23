@@ -10,17 +10,6 @@ format(String, Data) -> lists:flatten(io_lib:format(String, Data)).
 
 globalize(Ids) -> [format("~s|~s", [Id, node()]) || Id <- Ids].
 
-parse_game_id(GameId) ->
-    case string:lexemes(GameId, "|") of
-        [Id, Node] ->
-            NodeAtom = list_to_atom(Node),
-            case lists:member(NodeAtom, [node() | nodes()]) of
-                true -> {Id, NodeAtom};
-                false -> invalid_game_id
-            end;
-        _ -> invalid_game_id
-    end.
-
 unsubscribe(Socket, Subscriptions) -> [subscription ! {lea, Socket} || subscription <- Subscriptions].
 
 spawn_services(ListenSocket) ->
@@ -129,10 +118,6 @@ gamelist(Games, Id) ->
     end,
     ok.
 
-get_games(Node) ->
-    {gamelist, Node} ! {get_games, self()},
-    receive Games -> Games end.
-
 game(Board, Players, Turn, Observers) ->
     receive
         {acc, Player2, Caller} ->
@@ -172,6 +157,41 @@ psocket(Socket) ->
         {error, Reason} -> io:format("WOOOW: not implemented ~s", [Reason])
     end,
     ok.
+
+pcomando(Data, Socket, CallerNode) ->
+    io:format(user, ">> Ejecutando pcomando de ~p para el nodo ~p.~n", [Socket, CallerNode]),
+    Lexemes = string:lexemes(string:trim(Data), " "),
+    case Lexemes of
+        ["CON", Username] -> p_con(Socket, CallerNode, Username);
+        ["BYE"] -> p_bye(Socket, CallerNode);
+        [CMD, CMDID | Args] ->
+            case {CMD, Args} of
+                {"LSG", []} -> p_lsg(Socket, CMDID);
+                {"NEW", []} -> p_new(Socket, CallerNode, CMDID);
+                {"ACC", [GameId]} -> p_acc(Socket, CMDID, GameId);
+                {"PLA", [GameId, Move]} -> p_pla(Socket, CMDID, GameId, Move);
+                {"OBS", [GameId]} -> p_obs(Socket, CMDID, GameId);
+                {"LEA", [GameId]} -> p_lea(Socket, CMDID, GameId);
+                _ -> gen_tcp:send(Socket, format("ERROR ~s invalid_command", [CMDID]))
+            end;
+        _ -> gen_tcp:send(Socket, "ERROR invalid_command")
+    end,
+    ok.
+
+get_games(Node) ->
+    {gamelist, Node} ! {get_games, self()},
+    receive Games -> Games end.
+
+parse_game_id(GameId) ->
+    case string:lexemes(GameId, "|") of
+        [Id, Node] ->
+            NodeAtom = list_to_atom(Node),
+            case lists:member(NodeAtom, [node() | nodes()]) of
+                true -> {Id, NodeAtom};
+                false -> invalid_game_id
+            end;
+        _ -> invalid_game_id
+    end.
 
 p_con(Socket, CallerNode, Username) ->
     {userlist, CallerNode} ! {put_user, Socket, Username, self()},
@@ -248,25 +268,5 @@ p_lea(Socket, CMDID, GameId) ->
                 ok -> gen_tcp:send(Socket, format("OK ~s", [CMDID]));
                 invalid_game_id -> gen_tcp:send(Socket, format("ERROR ~s invalid_game_id", [CMDID]))
             end
-    end,
-    ok.
-
-pcomando(Data, Socket, CallerNode) ->
-    io:format(user, ">> Ejecutando pcomando de ~p para el nodo ~p.~n", [Socket, CallerNode]),
-    Lexemes = string:lexemes(string:trim(Data), " "),
-    case Lexemes of
-        ["CON", Username] -> p_con(Socket, CallerNode, Username);
-        ["BYE"] -> p_bye(Socket, CallerNode);
-        [CMD, CMDID | Args] ->
-            case {CMD, Args} of
-                {"LSG", []} -> p_lsg(Socket, CMDID);
-                {"NEW", []} -> p_new(Socket, CallerNode, CMDID);
-                {"ACC", [GameId]} -> p_acc(Socket, CMDID, GameId);
-                {"PLA", [GameId, Move]} -> p_pla(Socket, CMDID, GameId, Move);
-                {"OBS", [GameId]} -> p_obs(Socket, CMDID, GameId);
-                {"LEA", [GameId]} -> p_lea(Socket, CMDID, GameId);
-                _ -> gen_tcp:send(Socket, format("ERROR ~s invalid_command", [CMDID]))
-            end;
-        _ -> gen_tcp:send(Socket, "ERROR invalid_command")
     end,
     ok.
