@@ -10,7 +10,27 @@ format(String, Data) -> lists:flatten(io_lib:format(String, Data)).
 
 globalize(Ids) -> [format("~s|~s", [Id, node()]) || Id <- Ids].
 
-unsubscribe(Socket, Subscriptions) -> [subscription ! {lea, Socket} || subscription <- Subscriptions].
+unsubscribe(_, []) -> ok;
+unsubscribe(Username, [Subscription | Subscriptions]) ->
+    case parse_game_id(Subscription) of
+        invalid_game_id -> unsubscribe(Username, Subscriptions);
+        {Id, Node} ->
+            {gamelist, Node} ! {leave_game, Username, Id, self()},
+            receive _ -> unsubscribe(Username, Subscriptions) end
+    end.
+
+get_games(Node) -> {gamelist, Node} ! {get_globalized_games, self()}, receive Games -> Games end.
+
+parse_game_id(GameId) ->
+    case string:lexemes(GameId, "|") of
+        [Id, Node] ->
+            NodeAtom = list_to_atom(Node),
+            case lists:member(NodeAtom, [node() | nodes()]) of
+                true -> {Id, NodeAtom};
+                false -> invalid_game_id
+            end;
+        _ -> invalid_game_id
+    end.
 
 spawn_services(ListenSocket) ->
     {_, Port} = inet:port(ListenSocket),
@@ -57,62 +77,61 @@ pbalance(NodeLoads) ->
 userlist(Users) ->
     io:format(">> Users: ~p.~n", [Users]),
     receive
-        {put_user, Socket, Username, Caller} ->
-            case lists:member("#", Username) of
+        {put_user, Username, Socket, Caller} ->
+            case lists:member("|", Username) of
                 true -> Caller ! invalid_username;
                 false ->
-                    case lists:member(Username, maps:values(Users)) of
+                    case lists:member(Username, maps:keys(Users)) of
                         true -> Caller ! username_taken, userlist(Users);
-                        false -> Caller ! ok, userlist(maps:put(Socket, Username, Users))
+                        false -> Caller ! ok, userlist(maps:put(Username, Socket, Users))
                     end
             end;
-        {remove_user, Socket} -> userlist(maps:remove(Socket, Users))
-    end,
-    ok.
+        {remove_user, Username} -> userlist(maps:remove(Username, Users))
+    end.
 
 gamelist(Games, Id) ->
     io:format(">> Games: ~p.~n", [Games]),
     receive
-        {create_game, Socket, Caller} ->
+        {create_game, Username, Caller} ->
             GameId = integer_to_list(Id),
-            GameProcessId = spawn(?MODULE, game, [[], [Socket], 1, []]),
-            Caller ! ok,
+            GameProcessId = spawn(?MODULE, game, [[], [Username], 1, []]),
+            Caller ! {ok, globalize(GameId)},
             gamelist(maps:put(GameId, GameProcessId, Games), Id + 1);
-        {get_games, Caller} ->
+        {get_globalized_games, Caller} ->
             Caller ! globalize(maps:keys(Games)),
             gamelist(Games, Id);
-        {accept_game, Socket, GameId, Caller} ->
+        {accept_game, Username, GameId, Caller} ->
             case maps:get(GameId, Games, invalid_game_id) of
                 invalid_game_id -> Caller ! invalid_game_id;
                 GameProcessId ->
-                    GameProcessId ! {acc, Socket, self()},
+                    GameProcessId ! {acc, Username, self()},
                     receive
                         ok -> Caller ! ok;
                         game_full -> Caller ! game_full
                     end
             end,
             gamelist(Games, Id);
-        {observe_game, Socket, GameId, Caller} ->
+        {observe_game, Username, GameId, Caller} ->
             case maps:get(GameId, Games, invalid_game_id) of
                 invalid_game_id -> Caller ! invalid_game_id;
-                GameProcessId -> GameProcessId ! {obs, Socket}, Caller ! ok
+                GameProcessId -> GameProcessId ! {obs, Username}, Caller ! ok
             end,
             gamelist(Games, Id);
-        {player_move, Socket, GameId, Move, Caller} ->
+        {player_move, Username, GameId, Move, Caller} ->
             case maps:get(GameId, Games, invalid_game_id) of
                 invalid_game_id -> Caller ! invalid_game_id;
                 GameProcessId ->
-                    GameProcessId ! {pla, Socket, Move, self()},
+                    GameProcessId ! {pla, Username, Move, self()},
                     receive
                         ok -> Caller ! ok;
                         invalid_move -> Caller ! invalid_move
                     end
             end,
             gamelist(Games, Id);
-        {leave_game, Socket, GameId, Caller} ->
+        {leave_game, Username, GameId, Caller} ->
             case maps:get(GameId, Games, invalid_game_id) of
                 invalid_game_id -> Caller ! invalid_game_id;
-                GameProcessId -> GameProcessId ! {lea, Socket}
+                GameProcessId -> GameProcessId ! {lea, Username}, Caller ! ok
             end,
             gamelist(Games, Id)
     end,
@@ -127,14 +146,14 @@ game(Board, Players, Turn, Observers) ->
             end;
         {obs, Observer} -> game(Board, Players, Turn, [Observer | Observers]);
         {pla, _, _, Caller} -> Caller ! ok, game(Board, Players, Turn, Observers); % TODO: fix
-        {lea, Socket} -> game(Board, lists:delete(Socket, Players), Turn, lists:delete(Socket, Observers))
+        {lea, Username} -> game(Board, lists:delete(Username, Players), Turn, lists:delete(Username, Observers))
     end.
 
 dispatcher(ListenSocket) ->
     case gen_tcp:accept(ListenSocket) of
         {ok, Socket} ->
             io:format(">> Se ha conectado un nuevo cliente ~p~n", [Socket]),
-            spawn(?MODULE, psocket, [Socket, []]),
+            spawn(?MODULE, psocket, [Socket, unknown, []]),
             dispatcher(ListenSocket);
         {error, Reason} ->
             io:format(">> Error: ~p.~n", [Reason])
@@ -142,131 +161,112 @@ dispatcher(ListenSocket) ->
     end,
     ok.
 
-psocket(Socket) ->
-    case gen_tcp:recv(Socket, 0) of
-        {ok, Data} ->
+psocket(Socket, unknown, []) ->
+    inet:setopts(Socket, [{active, once}]),
+    receive
+        {tcp, Socket, Data} ->
+            Lexemes = string:lexemes(string:trim(Data), " "),
+            case Lexemes of
+                ["CON", Username] ->
+                    userlist ! {put_user, Username, Socket, self()},
+                    receive
+                        ok -> gen_tcp:send(Socket, "OK"), psocket(Socket, Username, []);
+                        invalid_username -> gen_tcp:send(Socket, "ERROR invalid_username"), psocket(Socket, unknown, []);
+                        username_taken -> gen_tcp:send(Socket, "ERROR username_taken"), psocket(Socket, unknown, [])
+                    end;
+                _ -> gen_tcp:send("ERROR not_registered"), psocket(Socket, unknown, [])
+            end;
+        {tcp_closed, Socket} -> ok
+    end;
+psocket(Socket, Username, Subscriptions) ->
+    inet:setopts(Socket, [{active, once}]),
+    receive
+        {tcp, Socket, Data} ->
             pbalance ! {get_best_node, self()},
-            receive
-                BestNode -> spawn(BestNode, ?MODULE, pcomando, [Data, Socket, node()])
+            receive {best_node, BestNode} -> spawn(BestNode, ?MODULE, pcomando, [Data, globalize(Username), self()]) end,
+            psocket(Socket, Username, Subscriptions);
+        {tcp_closed, Socket} -> userlist ! {remove_user, Username}, unsubscribe(Username, Subscriptions);
+        bye -> userlist ! {remove_user, Username}, unsubscribe(Username, Subscriptions), gen_tcp:close(Socket);
+        {lsg, CMDID, Games} ->
+            case Games of
+                [] -> gen_tcp:send(Socket, format("OK ~s", [CMDID]));
+                _ -> gen_tcp:send(Socket, format("OK ~s ~s", [CMDID, string:join(Games, " ")]))
             end,
-            psocket(Socket);
-        {error, closed} ->
-            Subscriptions = [],
-            unsubscribe(Socket, Subscriptions),
-            userlist ! {remove_user, Socket};
-        {error, Reason} -> io:format("WOOOW: not implemented ~s", [Reason])
-    end,
-    ok.
-
-pcomando(Data, Socket, CallerNode) ->
-    io:format(user, ">> Ejecutando pcomando de ~p para el nodo ~p.~n", [Socket, CallerNode]),
-    Lexemes = string:lexemes(string:trim(Data), " "),
-    case Lexemes of
-        ["CON", Username] -> p_con(Socket, CallerNode, Username);
-        ["BYE"] -> p_bye(Socket, CallerNode);
-        [CMD, CMDID | Args] ->
-            case {CMD, Args} of
-                {"LSG", []} -> p_lsg(Socket, CMDID);
-                {"NEW", []} -> p_new(Socket, CallerNode, CMDID);
-                {"ACC", [GameId]} -> p_acc(Socket, CMDID, GameId);
-                {"PLA", [GameId, Move]} -> p_pla(Socket, CMDID, GameId, Move);
-                {"OBS", [GameId]} -> p_obs(Socket, CMDID, GameId);
-                {"LEA", [GameId]} -> p_lea(Socket, CMDID, GameId);
-                _ -> gen_tcp:send(Socket, format("ERROR ~s invalid_command", [CMDID]))
-            end;
-        _ -> gen_tcp:send(Socket, "ERROR invalid_command")
-    end,
-    ok.
-
-get_games(Node) ->
-    {gamelist, Node} ! {get_games, self()},
-    receive Games -> Games end.
-
-parse_game_id(GameId) ->
-    case string:lexemes(GameId, "|") of
-        [Id, Node] ->
-            NodeAtom = list_to_atom(Node),
-            case lists:member(NodeAtom, [node() | nodes()]) of
-                true -> {Id, NodeAtom};
-                false -> invalid_game_id
-            end;
-        _ -> invalid_game_id
+            psocket(Socket, Username, Subscriptions);
+        {new, CMDID, GameId} ->
+            gen_tcp:send(Socket, format("OK ~s", [CMDID])),
+            psocket(Socket, Username, [GameId | Subscriptions]);
+        {acc, CMDID, GameId} ->
+            gen_tcp:send(Socket, format("OK ~s", [CMDID])),
+            psocket(Socket, Username, [GameId | Subscriptions]);
+        {pla, CMDID, _, _} -> gen_tcp:send(Socket, format("OK ~s", [CMDID]));
+        {obs, CMDID, GameId} ->
+            gen_tcp:send(Socket, format("OK ~s", [CMDID])),
+            psocket(Socket, Username, [GameId | Subscriptions]);
+        {lea, CMDID, GameId} ->
+            gen_tcp:send(Socket, format("OK ~s", [CMDID])),
+            psocket(Socket, Username, lists:delete(GameId, Subscriptions));
+        {error, Args} ->
+            gen_tcp:send(Socket, format("ERROR ~s", [string:join(Args, " ")])),
+            psocket(Socket, Username, Subscriptions)
     end.
 
-p_con(Socket, CallerNode, Username) ->
-    {userlist, CallerNode} ! {put_user, Socket, Username, self()},
-    receive
-        ok -> gen_tcp:send(Socket, "OK");
-        invalid_username -> gen_tcp:send(Socket, "ERROR invalid_username");
-        username_taken -> gen_tcp:send(Socket, "ERROR username_taken")
-    end,
-    ok.
-
-p_bye(Socket, CallerNode) ->
-    {userlist, CallerNode} ! {remove_user, Socket},
-    Subscriptions = [],
-    unsubscribe(Socket, Subscriptions),
-    ok.
-
-p_lsg(Socket, CMDID) ->
-    Games = lists:concat([get_games(Node) || Node <- [node() | nodes()]]),
-    case Games of
-        [] -> gen_tcp:send(Socket, format("OK ~s", [CMDID]));
-        _ -> gen_tcp:send(Socket, format("OK ~s ~s", [CMDID, string:join(Games, " ")]))
-    end,
-    ok.
-
-p_new(Socket, CallerNode, CMDID) ->
-    {gamelist, CallerNode} ! {create_game, Socket, self()},
-    receive ok -> gen_tcp:send(Socket, format("OK ~s", [CMDID])) end,
-    ok.
-
-p_acc(Socket, CMDID, GameId) ->
-    case parse_game_id(GameId) of
-        invalid_game_id -> gen_tcp:send(Socket, format("ERROR ~s invalid_game_id", [CMDID]));
-        {Id, Node} ->
-            {gamelist, Node} ! {accept_game, Socket, Id, self()},
-            receive
-                ok -> gen_tcp:send(Socket, format("OK ~s", [CMDID]));
-                game_full -> gen_tcp:send(Socket, format("ERROR ~s game_full", [CMDID]));
-                invalid_game_id -> gen_tcp:send(Socket, format("ERROR ~s invalid_game_id", [CMDID]))
-            end
-    end,
-    ok.
-
-p_pla(Socket, CMDID, GameId, Move) ->
-    case parse_game_id(GameId) of
-        invalid_game_id -> gen_tcp:send(Socket, format("ERROR ~s invalid_game_id", [CMDID]));
-        {Id, Node} ->
-            {gamelist, Node} ! {player_move, Socket, Id, Move, self()},
-            receive
-                ok -> gen_tcp:send(Socket, format("OK ~s", [CMDID]));
-                invalid_move -> gen_tcp:send(Socket, format("ERROR ~s invalid_move", [CMDID]));
-                invalid_game_id -> gen_tcp:send(Socket, format("ERROR ~s invalid_game_id", [CMDID]))
-            end
-    end,
-    ok.
-
-p_obs(Socket, CMDID, GameId) ->
-    case parse_game_id(GameId) of
-        invalid_game_id -> gen_tcp:send(Socket, format("ERROR ~s invalid_game_id", [CMDID]));
-        {Id, Node} ->
-            {gamelist, Node} ! {observe_game, Socket, Id, self()},
-            receive
-                ok -> gen_tcp:send(Socket, format("OK ~s", [CMDID]));
-                invalid_game_id -> gen_tcp:send(Socket, format("ERROR ~s invalid_game_id", [CMDID]))
-            end
-    end,
-    ok.
-
-p_lea(Socket, CMDID, GameId) ->
-    case parse_game_id(GameId) of
-        invalid_game_id -> gen_tcp:send(Socket, format("ERROR ~s invalid_game_id", [CMDID]));
-        {Id, Node} ->
-            {gamelist, Node} ! {leave_game, Socket, Id, self()},
-            receive
-                ok -> gen_tcp:send(Socket, format("OK ~s", [CMDID]));
-                invalid_game_id -> gen_tcp:send(Socket, format("ERROR ~s invalid_game_id", [CMDID]))
-            end
-    end,
-    ok.
+pcomando(Data, Username, Caller) ->
+    Lexemes = string:lexemes(string:trim(Data), " "),
+    case Lexemes of
+        ["CON", _] -> Caller ! {error, "already_registered"};
+        ["BYE"] -> Caller ! bye;
+        [CMD, CMDID | Args] ->
+            case {CMD, Args} of
+                {"LSG", []} ->
+                    Games = lists:concat([get_games(Node) || Node <- [node() | nodes()]]),
+                    Caller ! {lsg, CMDID, Games};
+                {"NEW", []} ->
+                    gamelist ! {create_game, Username, self()},
+                    receive {ok, GameId} -> Caller ! {new, CMDID, GameId} end;
+                {"ACC", [GameId]} ->
+                    case parse_game_id(GameId) of
+                        invalid_game_id -> Caller ! {error, [CMDID, "invalid_game_id"]};
+                        {Id, Node} ->
+                            {gamelist, Node} ! {accept_game, Username, Id, self()},
+                            receive
+                                ok -> Caller ! {acc, CMDID, GameId};
+                                game_full -> Caller ! {error, [CMDID, "game_full"]};
+                                invalid_game_id -> Caller ! {error, [CMDID, "invalid_game_id"]}
+                            end
+                    end;
+                {"PLA", [GameId, Move]} ->
+                    case parse_game_id(GameId) of
+                        invalid_game_id -> Caller ! {error, [CMDID, "invalid_game_id"]};
+                        {Id, Node} ->
+                            {gamelist, Node} ! {player_move, Username, Id, Move, self()},
+                            receive
+                                ok -> Caller ! {pla, CMDID, GameId, Move};
+                                game_full -> Caller ! {error, [CMDID, "game_full"]};
+                                invalid_game_id -> Caller ! {error, [CMDID, "invalid_game_id"]}
+                            end
+                    end;
+                {"OBS", [GameId]} ->
+                    case parse_game_id(GameId) of
+                        invalid_game_id -> Caller ! {error, [CMDID, "invalid_game_id"]};
+                        {Id, Node} ->
+                            {gamelist, Node} ! {observe_game, Username, Id, self()},
+                            receive
+                                ok -> Caller ! {observe_game, CMDID, GameId};
+                                invalid_game_id -> Caller ! {error, [CMDID, "invalid_game_id"]}
+                            end
+                    end;
+                {"LEA", [GameId]} ->
+                    case parse_game_id(GameId) of
+                        invalid_game_id -> Caller ! {error, [CMDID, "invalid_game_id"]};
+                        {Id, Node} ->
+                            {gamelist, Node} ! {leave_game, Username, Id, self()},
+                            receive
+                                ok -> Caller ! {lea, CMDID, GameId};
+                                invalid_game_id -> Caller ! {error, [CMDID, "invalid_game_id"]}
+                            end
+                    end;
+                _ -> Caller ! {error, [CMDID, "invalid_command"]}
+            end;
+        _ -> Caller ! {error, ["invalid_command"]}
+    end.
