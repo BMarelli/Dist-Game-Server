@@ -59,6 +59,7 @@ pbalance(NodeLoads) ->
     end.
 
 userlist(Users) ->
+    io:format("(debug)>> Userlist: ~p~n", [Users]),
     receive
         {put_user, Username, PSocketId} ->
             case lists:member($|, Username) of
@@ -78,6 +79,7 @@ userlist(Users) ->
     end.
 
 gamelist(Games, Id) ->
+    io:format("(debug)>> Gamelist: ~p~n", [Games]),
     receive
         {create_game, Username, Caller} ->
             GameId = integer_to_list(Id),
@@ -112,6 +114,7 @@ gamelist(Games, Id) ->
                     receive
                         invalid_move -> Caller ! invalid_move;
                         not_your_turn -> Caller ! not_your_turn;
+                        game_not_started -> Caller ! game_not_started;
                         {board, Update} -> Caller ! {board, Update}
                     end
             end,
@@ -192,7 +195,7 @@ psocket(Socket, Username, Subscriptions) ->
 pcomando(Data, Username, Caller) ->
     Lexemes = string:lexemes(string:trim(Data), " "),
     case Lexemes of
-        ["CON", _] -> Caller ! {error, "already_registered"};
+        ["CON", _] -> Caller ! {error, ["already_registered"]};
         ["BYE"] -> Caller ! bye;
         [CMD, CMDID | Args] ->
             case {CMD, Args} of
@@ -220,10 +223,10 @@ pcomando(Data, Username, Caller) ->
                             {gamelist, Node} ! {player_move, Username, Id, Move, self()},
                             receive
                                 {board, Update} -> Caller ! {pla, CMDID, board, Update};
-                                {game_ended, Winner} -> Caller ! {pla, CMDID, game_ended, Winner};
                                 invalid_move -> Caller ! {error, [CMDID, "invalid_move"]};
                                 invalid_game_id -> Caller ! {error, [CMDID, "invalid_game_id"]};
-                                not_your_turn -> Caller ! {error, [CMDID, "not_your_turn"]}
+                                not_your_turn -> Caller ! {error, [CMDID, "not_your_turn"]};
+                                game_not_started -> Caller ! {error, [CMDID, "game_not_started"]}
                             end
                     end;
                 {"OBS", [GameId]} ->
@@ -232,7 +235,7 @@ pcomando(Data, Username, Caller) ->
                         {Id, Node} ->
                             {gamelist, Node} ! {observe_game, Username, Id, self()},
                             receive
-                                ok -> Caller ! {observe_game, CMDID, GameId};
+                                ok -> Caller ! {obs, CMDID, GameId};
                                 invalid_game_id -> Caller ! {error, [CMDID, "invalid_game_id"]}
                             end
                     end;
@@ -252,11 +255,15 @@ pcomando(Data, Username, Caller) ->
     end.
 
 lobby(Player1, Observers, GameId) ->
+    io:format("(debug)>> Game ~s: ~p ++ ~p~n", [GameId, Player1, Observers]),
     receive
         {acc, Player1, Caller} -> Caller ! ok, lobby(Player1, Observers, GameId);
-        {acc, Player2, Caller} -> Caller ! ok, game([0, 0, 0, 0, 0, 0, 0, 0, 0], [Player1, Player2], 1, Observers, GameId);
+        {acc, Player2, Caller} ->
+            Caller ! ok,
+            game([0, 0, 0, 0, 0, 0, 0, 0, 0], [Player1, Player2], 1, lists:delete(Player2, Observers), GameId);
+        {obs, Player1} -> lobby(Player1, Observers, GameId);
         {obs, Observer} ->
-            case lists:member(Observer, Observers) or Observer == Player1 of
+            case lists:member(Observer, Observers) of
                 true -> lobby(Player1, Observers, GameId);
                 false -> lobby(Player1, [Observer | Observers], GameId)
             end;
@@ -265,6 +272,7 @@ lobby(Player1, Observers, GameId) ->
     end.
 
 game(Board, Players, Turn, Observers, GameId) ->
+    io:format("(debug)>> Game ~s: ~p ++ ~p~n", [GameId, Players, Observers]),
     receive
         {acc, _, Caller} -> Caller ! game_full, game(Board, Players, Turn, Observers, GameId);
         {obs, Observer} ->
@@ -300,20 +308,15 @@ edit_board(Board, Turn, MoveStr) ->
     try list_to_integer(MoveStr) of
         Move ->
             case Move < 1 orelse Move > 9 orelse lists:nth(Move, Board) =/= 0 of
-            true ->
-                invalid_move;
+            true -> invalid_move;
             false ->
                 NewBoard = lists:sublist(Board, Move) ++ [Turn] ++ lists:nthtail(Board, Move + 1),
                 case check_winner(Board, Turn) of
-                    false ->
-                        NewBoard;
-                    Winner ->
-                        {game_ended, Winner}
+                    false -> NewBoard;
+                    Winner -> {game_ended, Winner}
                 end
             end
-    catch
-        _:_ ->
-            invalid_move
+    catch _:_ -> invalid_move
     end.
 
 check_winner([A11, A12, A13, A21, A22, A23, A31, A32, A33] = Board, Turn) ->
