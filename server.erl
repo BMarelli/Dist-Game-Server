@@ -74,7 +74,8 @@ userlist(Users) ->
             case maps:get(Username, Users, invalid_username) of
                 invalid_username -> Caller ! invalid_username;
                 PSocketId -> Caller ! {user, PSocketId}
-            end;
+            end,
+            userlist(Users);
         {remove_user, Username} -> userlist(maps:remove(Username, Users))
     end.
 
@@ -185,7 +186,7 @@ psocket(Socket, Username, Subscriptions) ->
             gen_tcp:send(Socket, format("OK ~s", [CMDID])),
             psocket(Socket, Username, lists:delete(GameId, Subscriptions));
         {upd, CMDID, GameId, Update} ->
-            gen_tcp:send(Socket, format("OK ~s ~s ~s", [CMDID, GameId, Update])),
+            gen_tcp:send(Socket, format("UPD ~s ~s ~s", [CMDID, GameId, Update])),
             psocket(Socket, Username, Subscriptions);
         {error, Args} ->
             gen_tcp:send(Socket, format("ERROR ~s", [string:join(Args, " ")])),
