@@ -18,9 +18,11 @@ help() ->
     io:format("[LEA GameId] Dejar de observar un juego. ~n"),
     io:format("[BYE] Terminar la conexión, abandonando todos los juegos en los que participes. ~n").
 
-% TODO: usar X y O en vez de 1 y -1. vamos a tener que mantener conocimiento sobre si somos player1 o player2
+prettify(V) ->
+    case V of "0" -> " "; "1" -> "O"; "-1" -> "X" end.
+
 show_board(GameId, Board) ->
-    [A11, A12, A13, A21, A22, A23, A31, A32, A33] = string:lexemes(Board, ","),
+    [A11, A12, A13, A21, A22, A23, A31, A32, A33] = [prettify(V) || V <- string:lexemes(Board, ",")],
     io:format(">> Board [~s]~n", [GameId]),
     io:format(" ~s | ~s | ~s ~n", [A11, A12, A13]),
     io:format("-----------~n"),

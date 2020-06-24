@@ -184,7 +184,7 @@ psocket(Socket) ->
                         {put_user, ok} ->
                             io:format(">> El cliente ~p se ha registrado como ~s~n", [Socket, Username]),
                             gen_tcp:send(Socket, "OK"),
-                            psocket(Socket, Username, [], []);
+                            psocket(Socket, Username, [], [], 1);
                         {put_user, invalid_username} -> gen_tcp:send(Socket, "ERROR invalid_username"), psocket(Socket);
                         {put_user, username_taken} -> gen_tcp:send(Socket, "ERROR username_taken"), psocket(Socket)
                     end;
@@ -192,13 +192,13 @@ psocket(Socket) ->
             end;
         {tcp_closed, Socket} -> io:format(">> Se ha desconectado el cliente ~p~n", [Socket])
     end.
-psocket(Socket, Username, Playing, Observing) ->
+psocket(Socket, Username, Playing, Observing, Id) ->
     inet:setopts(Socket, [{active, once}]),
     receive
         {tcp, Socket, Data} ->
             pbalance ! {get_best_node, self()},
             receive {best_node, BestNode} -> spawn(BestNode, ?MODULE, pcomando, [Data, globalise(Username), self()]) end,
-            psocket(Socket, Username, Playing, Observing);
+            psocket(Socket, Username, Playing, Observing, Id);
         {tcp_closed, Socket} ->
             io:format(">> Se ha desconectado el cliente ~s~n", [Username]),
             userlist ! {remove_user, Username},
@@ -216,47 +216,47 @@ psocket(Socket, Username, Playing, Observing) ->
                 [] -> gen_tcp:send(Socket, format("OK ~s", [CMDID]));
                 _ -> gen_tcp:send(Socket, format("OK ~s ~s", [CMDID, string:join(Games, " ")]))
             end,
-            psocket(Socket, Username, Playing, Observing);
+            psocket(Socket, Username, Playing, Observing, Id);
         {new, CMDID, GlobalGameId} ->
             io:format(">> Se creó un nuevo juego para el cliente ~s~n", [Username]),
             gen_tcp:send(Socket, format("OK ~s ~s", [CMDID, GlobalGameId])),
-            psocket(Socket, Username, [GlobalGameId | Playing], Observing);
+            psocket(Socket, Username, [GlobalGameId | Playing], Observing, Id);
         {acc, CMDID, GlobalGameId} ->
             io:format(">> El cliente ~s se ha unido al juego ~s~n", [Username, GlobalGameId]),
             gen_tcp:send(Socket, format("OK ~s", [CMDID])),
-            psocket(Socket, Username, [GlobalGameId | Playing], lists:delete(GlobalGameId, Observing));
+            psocket(Socket, Username, [GlobalGameId | Playing], lists:delete(GlobalGameId, Observing), Id);
         {pla, CMDID, GlobalGameId, board, Board} ->
             io:format(">> El cliente ~s ha hecho una jugada en el juego ~s~n", [Username, GlobalGameId]),
             gen_tcp:send(Socket, format("OK ~s ~s board ~s", [CMDID, GlobalGameId, Board])),
-            psocket(Socket, Username, Playing, Observing);
+            psocket(Socket, Username, Playing, Observing, Id);
         {pla, CMDID, GlobalGameId, game_ended, Winner} ->
             io:format(">> El cliente ~s ha hecho una jugada en el juego ~s~n", [Username, GlobalGameId]),
             io:format(">> El juego ~s terminó. Ganador: ~s~n", [GlobalGameId, Winner]),
             gen_tcp:send(Socket, format("OK ~s ~s game_ended ~s", [CMDID, GlobalGameId, Winner])),
-            psocket(Socket, Username, lists:delete(GlobalGameId, Playing), Observing);
+            psocket(Socket, Username, lists:delete(GlobalGameId, Playing), Observing, Id);
         {obs, CMDID, GlobalGameId} ->
             io:format(">> El cliente ~s ha comenzado a observar el juego ~s~n", [Username, GlobalGameId]),
             gen_tcp:send(Socket, format("OK ~s", [CMDID])),
-            psocket(Socket, Username, Playing, [GlobalGameId | Observing]);
+            psocket(Socket, Username, Playing, [GlobalGameId | Observing], Id);
         {lea, CMDID, GlobalGameId} ->
             io:format(">> El cliente ~s ha dejado de observar el juego ~s~n", [Username, GlobalGameId]),
             gen_tcp:send(Socket, format("OK ~s", [CMDID])),
-            psocket(Socket, Username, Playing, lists:delete(GlobalGameId, Observing));
+            psocket(Socket, Username, Playing, lists:delete(GlobalGameId, Observing), Id);
         {upd, GlobalGameId, {board, Board}} ->
             io:format(">> Enviando actualización sobre el juego ~s a ~s~n", [GlobalGameId, Username]),
-            gen_tcp:send(Socket, format("UPD CMDID ~s board ~s", [GlobalGameId, Board])),
-            psocket(Socket, Username, Playing, Observing);
+            gen_tcp:send(Socket, format("UPD ~s ~s board ~s", [integer_to_list(Id), GlobalGameId, Board])),
+            psocket(Socket, Username, Playing, Observing, Id + 1);
         {upd, GlobalGameId, {game_ended, Winner}} ->
             io:format(">> Enviando actualización sobre el juego ~s a ~s~n", [GlobalGameId, Username]),
-            gen_tcp:send(Socket, format("UPD CMDID ~s game_ended ~s", [GlobalGameId, Winner])),
-            psocket(Socket, Username, Playing, lists:delete(GlobalGameId, Observing));
+            gen_tcp:send(Socket, format("UPD ~s ~s game_ended ~s", [integer_to_list(Id), GlobalGameId, Winner])),
+            psocket(Socket, Username, lists:delete(GlobalGameId, Playing), lists:delete(GlobalGameId, Observing), Id + 1);
         {error, Args} ->
             io:format(">> El pedido del cliente ~s resultó en un error: ERROR ~s~n", [Username, string:join(Args, " ")]),
             gen_tcp:send(Socket, format("ERROR ~s", [string:join(Args, " ")])),
-            psocket(Socket, Username, Playing, Observing);
+            psocket(Socket, Username, Playing, Observing, Id);
         display_current_state ->
             io:format("~s: Playing: ~p, Observing: ~p~n", [Username, Playing, Observing]),
-            psocket(Socket, Username, Playing, Observing)
+            psocket(Socket, Username, Playing, Observing, Id)
     end.
 
 pcomando(Data, Username, Caller) ->
@@ -359,16 +359,37 @@ leave_game(Game = #game{observers = Observers}, Observer) ->
         false -> {Game, not_an_observer}
     end.
 
-% TODO: implement
 player_move(Game = #game{player_1 = Player1, player_2 = Player2}, Player, "quit") ->
     if
-        Player == Player1 ->{Game, {game_ended, Player2}};
-        Player == Player2 -> {Game, {game_ended, Player1}};
+        Player == Player1 -> {Game#game{turn = -1}, {game_ended, Player2}};
+        Player == Player2 -> {Game#game{turn = 1}, {game_ended, Player1}};
         true -> {Game, not_a_player}
     end;
-player_move(Game = #game{board = Board, turn = Turn}, _, _) ->
-    {Game#game{turn = Turn * -1}, {board, string:join([integer_to_list(Value) || Value <- Board], ",")}}.
+player_move(Game = #game{player_2 = none}, _, _) -> {Game, wait_for_opponent_to_join};
+player_move(Game = #game{player_1 = Player, turn = -1}, Player, _) -> {Game, not_your_turn};
+player_move(Game = #game{player_2 = Player, turn = 1}, Player, _) -> {Game, not_your_turn};
+player_move(Game = #game{board = Board, player_1 = Player1, player_2 = Player2, turn = Turn}, Player, MoveStr) ->
+    case lists:member(Player, [Player1, Player2]) of
+        false -> {Game, not_a_player};
+        true ->
+            try list_to_integer(MoveStr) of
+                Move ->
+                    case Move < 1 orelse Move > 9 orelse lists:nth(Move, Board) =/= 0 of
+                        true -> {Game, invalid_move};
+                        false ->
+                            Board_ = lists:sublist(Board, Move - 1) ++ [Turn] ++ lists:nthtail(Move, Board),
+                            Game_ = Game#game{board=Board_, turn = Turn * -1},
+                            BoardStr = string:join([integer_to_list(Value) || Value <- Board_], ","),
+                            case check_winner(Board_, Turn, Player) of
+                                false -> {Game_, {board, BoardStr}};
+                                Winner -> {Game_, {game_ended, Winner}}
+                            end
+                    end
+            catch _:_ -> {Game, invalid_move}
+            end
+    end.
 
+update_opponent(_, #game{player_2 = none}, _) -> ok;
 update_opponent(GlobalGameId, #game{player_1 = Player1, player_2 = Player2, turn = Turn}, Response) ->
     case Turn of
         1 -> Player = Player1;
@@ -397,87 +418,15 @@ update_observers(GlobalGameId, [Observer | Observers], Response) ->
             update_observers(GlobalGameId, Observers, Response)
     end.
 
-% lobby(Player1, Observers, GameId) ->
-%     receive
-%         {acc, Player1, Caller} -> Caller ! ok, lobby(Player1, Observers, GameId);
-%         {acc, Player2, Caller} ->
-%             Caller ! ok,
-%             game([0, 0, 0, 0, 0, 0, 0, 0, 0], [Player1, Player2], 1, lists:delete(Player2, Observers), GameId);
-%         {obs, Player1} -> lobby(Player1, Observers, GameId);
-%         {obs, Observer} ->
-%             case lists:member(Observer, Observers) of
-%                 true -> lobby(Player1, Observers, GameId);
-%                 false -> lobby(Player1, [Observer | Observers], GameId)
-%             end;
-%         {lea, _} -> ok;
-%         {pla, _, _, Caller} -> Caller ! game_not_started
-%     end.
-
-% game(Board, Players, Turn, Observers, GameId) ->
-%     receive
-%         {acc, _, Caller} -> Caller ! game_full, game(Board, Players, Turn, Observers, GameId);
-%         {obs, Observer} ->
-%             case lists:member(Observer, Observers ++ Players) of
-%                 true -> game(Board, Players, Turn, Observers, GameId);
-%                 false -> game(Board, Players, Turn, [Observer | Observers], GameId)
-%             end;
-%         {pla, Player, Move, Caller} ->
-%                 case lists:nth(case Turn of 1 -> 1; -1 -> 2 end, Players) == Player of
-%                 true ->
-%                     case edit_board(Board, Turn, Move) of
-%                         invalid_move ->
-%                             Caller ! invalid_move,
-%                             game(Board, Players, Turn, Observers, GameId);
-%                         {game_ended, Winner} ->
-%                             Caller ! {game_ended, Winner},
-%                             update_subscribers({game_ended, Winner}, Players -- [Player] ++ Observers, GameId);
-%                         NewBoard ->
-%                             MSjBoard = string:join(lists:map(fun(X) -> x(X) end, NewBoard), ","),
-%                             Caller ! {board, MSjBoard},
-%                             update_subscribers({board, MSjBoard}, Players -- [Player] ++ Observers, GameId),
-%                             game(NewBoard, Players, (-1) * Turn, Observers, GameId)
-%                     end;
-%                 false -> Caller ! not_your_turn
-%             end;
-%         {lea, Username} ->
-%             case lists:member(Username, Players) of
-%                 true -> update_subscribers({game_ended, lists:nth(1, Players -- [Username])}, Players -- [Username] ++ Observers, GameId);
-%                 false -> game(Board, Players, Turn, lists:delete(Username, Observers), GameId)
-%             end
-%     end.
-
-% edit_board(Board, Turn, MoveStr) ->
-%     try list_to_integer(MoveStr) of
-%         Move ->
-%             case Move < 1 orelse Move > 9 orelse lists:nth(Move, Board) =/= 0 of
-%             true -> invalid_move;
-%             false ->
-%                 NewBoard = lists:sublist(Board, Move) ++ [Turn] ++ lists:nthtail(Move + 1, Board),
-%                 case check_winner(Board, Turn) of
-%                     false -> NewBoard;
-%                     Winner -> {game_ended, Winner}
-%                 end
-%             end
-%     catch _:_ -> invalid_move
-%     end.
-
-% check_winner([A11, A12, A13, A21, A22, A23, A31, A32, A33] = Board, Turn) ->
-%     M = lists:max([A11+A12+A13, A21+A22+A23, A31+A32+A33, A11+A21+A31, A12+A22+A32, A13+A23+A33, A11+A22+A33, A13+A22+A31]),
-%     Condition = 3 * Turn,
-%     case {lists:member(0, Board), M} of
-%         {_, Condition} -> Turn;
-%         {false, _} -> "DRAW";
-%         _ -> false
-%     end.
-
-% update_subscribers(_, [], _) -> ok;
-% update_subscribers({CMDID, Update}, [Subscriber | Subscribers], GameId) ->
-%     case parse_globalised_id(Subscriber) of
-%         {Id, Node} ->
-%             {userlist, Node} ! {get_user, Id, self()},
-%             receive
-%                 {get_user, invalid_username} -> ok; % TODO: CHECK?
-%                 {get_user, PSocketId} -> PSocketId ! {upd, CMDID, GameId, Update}
-%             end,
-%             update_subscribers({CMDID, Update}, Subscribers, GameId)
-%     end.
+check_winner([A11, A12, A13, A21, A22, A23, A31, A32, A33] = Board, Turn, Player) ->
+    Sums = [A11+A12+A13, A21+A22+A23, A31+A32+A33, A11+A21+A31, A12+A22+A32, A13+A23+A33, A11+A22+A33, A13+A22+A31],
+    case Turn of
+        1 -> X = lists:max(Sums);
+        -1 -> X = lists:min(Sums)
+    end,
+    Condition = 3 * Turn,
+    case {lists:member(0, Board), X} of
+        {false, _} -> "DRAW";
+        {_, Condition} -> Player;
+        _ -> false
+    end.
