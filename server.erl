@@ -1,14 +1,10 @@
 -module(server).
--compile(export_all).
+-export([start/0, dispatcher/1, pstat/0, pbalance/1, userlist/1, gamelist/2, psocket/1, pcomando/3, display_current_state/0]).
 
 -define(PSTAT_INTERVAL, 10000).
 -define(DEFAULT_PORT, 8000).
 
 -record(game, {player_1, player_2 = none, board = [0, 0, 0, 0, 0, 0, 0, 0, 0], turn = 1, observers = []}).
-
-% TODO: UPD CMDID should behave similar to client's side CMDIDs. The format should change to UPD CMDID GameId|Node info1 info2 ...
-
-% TODO 7: Don't export all.
 
 globalise(Id) -> format("~s|~s", [Id, node()]).
 
@@ -262,6 +258,7 @@ psocket(Socket, Username, Playing, Observing, Id) ->
 pcomando(Data, Username, Caller) ->
     Lexemes = string:lexemes(string:trim(Data), " "),
     case Lexemes of
+        ["OK", _] -> ok; % Respuestas del usuario a UPD
         ["CON", _] -> Caller ! {error, ["already_registered"]};
         ["BYE"] -> Caller ! bye;
         [CMD, CMDID | Args] ->
