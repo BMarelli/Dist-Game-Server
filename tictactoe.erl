@@ -3,7 +3,6 @@
 -compile(export_all).
 
 lobby(Player1, Observers, GameId) ->
-    io:format("(debug)>> Game ~s: ~p ++ ~p~n", [GameId, Player1, Observers]),
     receive
         {acc, Player1, Caller} -> Caller ! ok, lobby(Player1, Observers, GameId);
         {acc, Player2, Caller} ->
@@ -20,7 +19,6 @@ lobby(Player1, Observers, GameId) ->
     end.
 
 game(Board, Players, Turn, Observers, GameId) ->
-    io:format("(debug)>> Game ~s: ~p ++ ~p~n", [GameId, Players, Observers]),
     receive
         {acc, _, Caller} -> Caller ! game_full, game(Board, Players, Turn, Observers, GameId);
         {obs, Observer} ->
@@ -77,14 +75,14 @@ check_winner([A11, A12, A13, A21, A22, A23, A31, A32, A33] = Board, Turn) ->
         _ -> false
     end.
 
-% TODO: puede pasar que sea invalido? checkear
 update_subscribers(_, [], _) -> ok;
 update_subscribers({CMDID, Update}, [Subscriber | Subscribers], GameId) ->
     case util:parse_globalised_id(Subscriber) of
         {Id, Node} ->
             {userlist, Node} ! {get_user, Id, self()},
             receive
-                {user, PSocketId} -> PSocketId ! {upd, CMDID, GameId, Update}
+                {get_user, PSocketId} -> PSocketId ! {upd, CMDID, GameId, Update};
+                {get_user, invalid_username} -> ok % TODO: CHECK?
             end,
             update_subscribers({CMDID, Update}, Subscribers, GameId)
     end.
