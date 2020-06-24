@@ -71,13 +71,12 @@ receiver(Socket) ->
         {ok, Data} ->
             Lexemes = string:lexemes(Data, " "),
             case Lexemes of
-                ["ERROR" | _] -> io:format(Data);
                 ["UPD", CMDID, GameId, "board", Board] ->
-                    gen_tcp:send(Socket, format("OK", [CMDID])),
+                    gen_tcp:send(Socket, format("OK ~s", [CMDID])),
                     io:format("Actualización sobre el juego ~s:~n", [GameId]),
                     show_board(Board);
                 ["UPD", CMDID, GameId, "game_ended", Winner] ->
-                    gen_tcp:send(Socket, format("OK", [CMDID])),
+                    gen_tcp:send(Socket, format("OK ~s", [CMDID])),
                     io:format("Actualización sobre el juego ~s:~n", [GameId]),
                     io:format("Juego terminado. Ganador: ~s~n", [Winner]);
                 ["OK", _, GameId, "board", Board] ->
