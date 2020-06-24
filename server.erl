@@ -1,7 +1,6 @@
 -module(server).
 -define(PSTAT_INTERVAL, 10000).
 -define(DEFAULT_PORT, 8000).
--define(NEW_BOARD, [0, 0, 0, 0, 0, 0, 0, 0, 0]).
 
 -compile(export_all).
 
@@ -41,11 +40,8 @@ dispatcher(ListenSocket) ->
             Pid = spawn(?MODULE, psocket, [Socket]),
             gen_tcp:controlling_process(Socket, Pid),
             dispatcher(ListenSocket);
-        {error, Reason} ->
-            io:format(">> Error: ~p.~n", [Reason])
-            % TODO: cerrar el resto de las cosas?
-    end,
-    ok.
+        {error, Reason} -> io:format(">> Error: ~p.~n", [Reason])
+    end.
 
 pstat() ->
     Load = erlang:statistics(run_queue),
@@ -65,8 +61,8 @@ pbalance(NodeLoads) ->
 userlist(Users) ->
     receive
         {put_user, Username, PSocketId} ->
-            case lists:member("|", Username) of
-                true -> PSocketId ! invalid_username;
+            case lists:member($|, Username) of
+                true -> PSocketId ! invalid_username, userlist(Users);
                 false ->
                     case lists:member(Username, maps:keys(Users)) of
                         true -> PSocketId ! username_taken, userlist(Users);
@@ -122,17 +118,16 @@ gamelist(Games, Id) ->
             gamelist(Games, Id);
         {leave_game, Username, GameId, Caller} ->
             case maps:get(GameId, Games, invalid_game_id) of
-                invalid_game_id -> Caller ! invalid_game_id;
-                GameProcessId -> GameProcessId ! {lea, Username}, Caller ! ok
-            end,
-            gamelist(Games, Id)
+                invalid_game_id -> Caller ! invalid_game_id, gamelist(Games, Id);
+                GameProcessId -> GameProcessId ! {lea, Username}, Caller ! ok, gamelist(maps:remove(GameId, Games), Id)
+            end
     end.
 
 psocket(Socket) ->
     inet:setopts(Socket, [{active, once}]),
     receive
         {tcp, Socket, Data} ->
-            io:format(">> ~p: ~s~n", [Socket, string:trim(Data)]),
+            io:format("<< ~p: ~s~n", [Socket, string:trim(Data)]),
             Lexemes = string:lexemes(string:trim(Data), " "),
             case Lexemes of
                 ["CON", Username] ->
@@ -152,16 +147,16 @@ psocket(Socket, Username, Subscriptions) ->
     inet:setopts(Socket, [{active, once}]),
     receive
         {tcp, Socket, Data} ->
-            io:format(">> ~p: ~s~n", [Socket, string:trim(Data)]),
+            io:format("<< ~p: ~s~n", [Socket, string:trim(Data)]),
             pbalance ! {get_best_node, self()},
             receive {best_node, BestNode} -> spawn(BestNode, ?MODULE, pcomando, [Data, globalise(Username), self()]) end,
             psocket(Socket, Username, Subscriptions);
         {tcp_closed, Socket} ->
-            io:format(">> Se ha desconectado el cliente ~s~n", Username),
+            io:format(">> Se ha desconectado el cliente ~s~n", [Username]),
             userlist ! {remove_user, Username},
             unsubscribe(Username, Subscriptions);
         bye ->
-            io:format(">> Se ha desconectado el cliente ~s~n", Username),
+            io:format(">> Se ha desconectado el cliente ~s~n", [Username]),
             userlist ! {remove_user, Username},
             unsubscribe(Username, Subscriptions),
             gen_tcp:close(Socket);
@@ -258,8 +253,13 @@ pcomando(Data, Username, Caller) ->
 
 lobby(Player1, Observers, GameId) ->
     receive
-        {acc, Player2, Caller} -> Caller ! ok, game(?NEW_BOARD, [Player1, Player2], 1, Observers, GameId); % TODO: dont allow self play (?)
-        {obs, Observer} -> lobby(Player1, [Observer | Observers], GameId);
+        {acc, Player1, Caller} -> Caller ! ok, lobby(Player1, Observers, GameId);
+        {acc, Player2, Caller} -> Caller ! ok, game([0, 0, 0, 0, 0, 0, 0, 0, 0], [Player1, Player2], 1, Observers, GameId);
+        {obs, Observer} ->
+            case lists:member(Observer, Observers) or Observer == Player1 of
+                true -> lobby(Player1, Observers, GameId);
+                false -> lobby(Player1, [Observer | Observers], GameId)
+            end;
         {lea, _} -> ok;
         {pla, _, _, Caller} -> Caller ! game_not_started
     end.
@@ -267,7 +267,11 @@ lobby(Player1, Observers, GameId) ->
 game(Board, Players, Turn, Observers, GameId) ->
     receive
         {acc, _, Caller} -> Caller ! game_full, game(Board, Players, Turn, Observers, GameId);
-        {obs, Observer} -> game(Board, Players, Turn, [Observer | Observers], GameId); % TODO: don't allow players to observe, or duplicates
+        {obs, Observer} ->
+            case lists:member(Observer, Observers ++ Players) of
+                true -> game(Board, Players, Turn, Observers, GameId);
+                false -> game(Board, Players, Turn, [Observer | Observers], GameId)
+            end;
         {pla, Player, Move, Caller} ->
              case lists:nth(case Turn of 1 -> 1; -1 -> 2 end, Players) == Player of
                 true ->
