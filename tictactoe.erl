@@ -39,8 +39,9 @@ game(Board, Players, Turn, Observers, GameId) ->
                             Caller ! {game_ended, Winner},
                             update_subscribers({game_ended, Winner}, Players -- [Player] ++ Observers, GameId);
                         NewBoard ->
-                            Caller ! {board, string:join(NewBoard, ",")},
-                            update_subscribers({board, string:join(NewBoard, ",")}, Players -- [Player] ++ Observers, GameId),
+                            MSjBoard = string:join(lists:map(fun(X) -> integer_to_list(X) end, NewBoard), ","),
+                            Caller ! {board, MSjBoard},
+                            update_subscribers({board, MSjBoard}, Players -- [Player] ++ Observers, GameId),
                             game(NewBoard, Players, (-1) * Turn, Observers, GameId)
                     end;
                 false -> Caller ! not_your_turn
@@ -58,7 +59,7 @@ edit_board(Board, Turn, MoveStr) ->
             case Move < 1 orelse Move > 9 orelse lists:nth(Move, Board) =/= 0 of
             true -> invalid_move;
             false ->
-                NewBoard = lists:sublist(Board, Move) ++ [Turn] ++ lists:nthtail(Board, Move + 1),
+                NewBoard = lists:sublist(Board, Move) ++ [Turn] ++ lists:nthtail(Move + 1, Board),
                 case check_winner(Board, Turn) of
                     false -> NewBoard;
                     Winner -> {game_ended, Winner}
